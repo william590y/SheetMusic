@@ -4,20 +4,22 @@ This script defines configuration parameters internally.
 """
 
 import os
+import csv
 import torch
 import random
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, random_split
-from transformers import AutoTokenizer, AutoModelForCausalLM, AdamW
+from transformers import PreTrainedTokenizerFast, AutoModelForCausalLM, AdamW
 from anticipation.convert import midi_to_events, events_to_midi
-from anticipation.tokenize import tokenize, detokenize
+from anticipation.tokenize import tokenize, maybe_tokenize
+from anticipation.vocab import VOCAB_SIZE
 
 
 # ----------------------
 # Configuration Settings
 # ----------------------
 
-MODEL_NAME = 'stanford-crfm/music-medium-800k'
+MODEL_NAME = 'stanford-crfm/music-large-800k'
 INPUT_DIR = 'dataset/input'
 TARGET_DIR = 'dataset/target'
 OUTPUT_DIR = 'training_output'
@@ -52,16 +54,26 @@ class MIDIPairDataset(Dataset):
             input_path = os.path.join(input_dir, fname)
             target_path = os.path.join(target_dir, fname)
 
+            # MIDI to events
             input_events = midi_to_events(input_path)
             target_events = midi_to_events(target_path)
 
-            input_tokens = tokenize(input_events)
-            target_tokens = tokenize(target_events)
+            # Truncate event list before tokenizing
+            remainder = len(input_events) % 5
+            if remainder:
+                input_events = input_events[:-remainder]
+            remainder = len(target_events) % 5
+            if remainder:
+                target_events = target_events[:-remainder]
 
-            input_tensor = torch.tensor(input_tokens, dtype=torch.long)
-            target_tensor = torch.tensor(target_tokens, dtype=torch.long)
+            # Tokenize events
+            input_tokens = maybe_tokenize(input_events)
+            target_tokens = maybe_tokenize(target_events)
 
-            self.pairs.append((input_tensor, target_tensor))
+            if input_tokens is not None and target_tokens is not None:
+                input_tensor = torch.tensor(input_tokens, dtype=torch.long)
+                target_tensor = torch.tensor(target_tokens, dtype=torch.long)
+                self.pairs.append((input_tensor, target_tensor))
 
     def __len__(self):
         return len(self.pairs)
@@ -82,9 +94,13 @@ def collate_fn(batch):
 # ----------------------
 
 def main():
-    # Initialize the tokenizer and model
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+    # Initialize training logs
+    training_loss_log = []
+    validation_loss_log = []
+
+    # Initialize the model (rip no tokenizer from HF)
+    #tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, vocab_size=VOCAB_SIZE, ignore_mismatched_sizes = True).cuda()
 
     # Use GPU
     device = torch.device("cuda")
@@ -92,19 +108,50 @@ def main():
 
     # Create dataset and dataloader
     dataset = MIDIPairDataset(INPUT_DIR, TARGET_DIR)
-    loader = DataLoader(dataset,  batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+
+    # Split dataset into train, validation, and test splits
+    total_size = len(dataset)
+    train_size = int(TRAIN_SPLIT * total_size)
+    val_size = int(VAL_SPLIT * total_size)
+    test_size = total_size - train_size - val_size
+
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, 
+                            shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE,
+                          shuffle=False, collate_fn=collate_fn)
+
+    # Dump tokenized test dataset to disk without detokenizing
+    test_input_dir = os.path.join(OUTPUT_DIR, "test_input")
+    test_target_dir = os.path.join(OUTPUT_DIR, "test_target")
+    Path(test_input_dir).mkdir(parents=True, exist_ok=True)
+    Path(test_target_dir).mkdir(parents=True, exist_ok=True)
+
+    for idx in test_dataset.indices:
+        input_tensor, target_tensor = dataset[idx]
+        input_file = os.path.join(test_input_dir, f"test_input_{idx}.pt")
+        target_file = os.path.join(test_target_dir, f"test_target_{idx}.pt")
+        torch.save(input_tensor, input_file)
+        torch.save(target_tensor, target_file)
+
+    print(f"Test dataset files saved to {test_input_dir} and {test_target_dir}")
 
     # Prepare optimizer and learning rate scheduler
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     # Training Loop
+    best_val_loss = float('inf')
     global_step = 0
+    total_loss = 0
+
     for epoch in range(EPOCHS):
         model.train()
-        total_loss = 0
+        train_steps = 0
 
-        for batchidx, (inputs, targets) in enumerate(loader):
+        for batchidx, (inputs, targets) in enumerate(train_loader):
             inputs = inputs.to(device)
             targets = targets.to(device)
 
@@ -113,29 +160,74 @@ def main():
 
             outputs = model(inputs, labels=targets, attention_mask=attention_mask)
             loss = outputs.loss/GRAD_ACCUM
-
             loss.backward()
 
             if (batchidx+1) % GRAD_ACCUM == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
-                scheduler.step()
 
                 global_step += 1
                 total_loss += loss.item()
+                train_steps += 1
 
                 if global_step % LOG_INTERVAL == 0:
-                    avg_loss = total_loss / LOG_INTERVAL
+                    avg_loss = total_loss / train_steps
                     print(f"Epoch {epoch + 1} | Step {global_step} | Loss {avg_loss:.4f}")
+                    # Log the training loss
+                    training_loss_log.append((epoch + 1, global_step, avg_loss))
                     total_loss = 0
+                    train_steps = 0
+
+        # Validation phase
+        model.eval()
+        total_val_loss = 0
+        val_steps = 0
+
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                inputs = inputs.to(device)
+                targets = targets.to(device)
+                attention_mask = (inputs != 0).float()
+
+                outputs = model(inputs, labels=targets, attention_mask=attention_mask)
+                total_val_loss += outputs.loss.item()
+                val_steps += 1
+
+        avg_val_loss = total_val_loss / val_steps
+        print(f"Epoch {epoch + 1} | Validation Loss: {avg_val_loss:.4f}")
+
+        # Log the validation loss
+        validation_loss_log.append((epoch + 1, avg_val_loss))
+
+        # Save best model based on validation loss
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            ckpt_path = os.path.join(OUTPUT_DIR, "checkpoint-best")
+            Path(ckpt_path).mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(ckpt_path)
+            print(f"Saved best model with validation loss: {best_val_loss:.4f}")
 
         if (epoch+1) % SAVE_INTERVAL == 0:
             ckpt_path = os.path.join(OUTPUT_DIR, f"checkpoint-{epoch+1}")
             Path(ckpt_path).mkdir(parents=True, exist_ok=True)
             model.save_pretrained(ckpt_path)
-            tokenizer.save_pretrained(ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")
+
+        scheduler.step()
+
+    # Write the losses to a csv file
+    csv_path = os.path.join(OUTPUT_DIR, "loss_logs.csv")
+    with open(csv_path, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["Epoch", "Global_Step", "Train_Loss", "Validation_Loss"])
+        max_steps = max([item[1] for item in training_loss_log], default=0)
+        for epoch, val_loss in validation_loss_log:
+            # Use most recent training loss for that epoch
+            train_loss = next((tl for (e, step, tl) in training_loss_log if e == epoch), None)
+            writer.writerow([epoch, max_steps, train_loss if train_loss is not None else "", val_loss])
+
+    print(f"Training complete. Loss logs saved to {csv_path}")
 
 if __name__ == "__main__":
     # Ensure output directory exists
