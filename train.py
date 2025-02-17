@@ -13,6 +13,7 @@ from transformers import PreTrainedTokenizerFast, AutoModelForCausalLM, AdamW
 from anticipation.convert import midi_to_events, events_to_midi
 from anticipation.tokenize import tokenize, maybe_tokenize
 from anticipation.vocab import VOCAB_SIZE
+from anticipation.convert import midi_to_compound
 
 
 # ----------------------
@@ -58,17 +59,9 @@ class MIDIPairDataset(Dataset):
             input_events = midi_to_events(input_path)
             target_events = midi_to_events(target_path)
 
-            # Truncate event list before tokenizing
-            remainder = len(input_events) % 5
-            if remainder:
-                input_events = input_events[:-remainder]
-            remainder = len(target_events) % 5
-            if remainder:
-                target_events = target_events[:-remainder]
-
             # Tokenize events
-            input_tokens = maybe_tokenize(input_events)
-            target_tokens = maybe_tokenize(target_events)
+            input_tokens = midi_to_compound(input_events)
+            target_tokens = midi_to_compound(target_events)
 
             if input_tokens is not None and target_tokens is not None:
                 input_tensor = torch.tensor(input_tokens, dtype=torch.long)
