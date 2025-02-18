@@ -63,13 +63,6 @@ def process_file(fname, input_dir, target_dir):
     if len(input_events) % 3 != 0 or len(target_events) % 3 != 0:
         raise ValueError(f"Invalid compound sequence length in {fname}")
 
-    # Map raw event tokens to model vocabulary indices
-    try:
-        input_token_ids = encode_tokens(input_events)
-        target_token_ids = encode_tokens(target_events)
-    except ValueError as e:
-        print(f"Encoding error in file {fname}: {str(e)}")
-
     print(f"Processed {fname} with {len(input_events)//3} input tokens and {len(target_events)//3} target tokens")
     return torch.tensor(input_events), torch.tensor(target_events)
 
@@ -130,7 +123,7 @@ def main():
     test_size = total_size - train_size - val_size
 
     generator = torch.Generator().manual_seed(42)
-    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size], generator = generator)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, 
                             shuffle=True, collate_fn=collate_fn)
