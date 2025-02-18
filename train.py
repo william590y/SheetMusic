@@ -71,15 +71,13 @@ class MIDIPairDataset(Dataset):
             # Validate length of event token sequence (should be multiple of 3)
             if len(input_events) % 3 != 0 or len(target_events) % 3 != 0:
                 raise ValueError(f"Invalid compound sequence length in {fname}")
-            
-            # Tokenize using library's method
-            input_tokens = tokenize(input_events)
-            target_tokens = tokenize(target_events)
 
             self.pairs.append((
-                torch.tensor(input_tokens),
-                torch.tensor(target_tokens)
+                torch.tensor(input_events),
+                torch.tensor(target_events)
             ))
+
+            print(f"Processed {fname} with {len(input_events)//3} input tokens and {len(target_events)//3} target tokens")
 
     def __len__(self):
         return len(self.pairs)
