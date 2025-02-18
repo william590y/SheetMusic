@@ -15,6 +15,8 @@ from anticipation.tokenize import tokenize, maybe_tokenize
 from anticipation.vocab import VOCAB_SIZE
 from anticipation.convert import midi_to_compound, compound_to_events
 from anticipation import ops
+import concurrent.futures
+from tqdm import tqdm
 
 
 # ----------------------
@@ -41,6 +43,29 @@ TEST_SPLIT = 0.1
 # Dataset and Collation
 # ----------------------
 
+def process_file(fname, input_dir, target_dir):
+    input_path = os.path.join(input_dir, fname)
+    target_path = os.path.join(target_dir, fname)
+
+    # MIDI to compound events (5-token groups)
+    input_compound = midi_to_compound(input_path, debug=True)
+    target_compound = midi_to_compound(target_path, debug=True)
+
+    # Convert compound tokens to event tokens (3-token groups)
+    input_events = compound_to_events(input_compound)
+    target_events = compound_to_events(target_compound)
+
+    # Apply clipping to event tokens
+    input_events = ops.clip(input_events, 0, 127)
+    target_events = ops.clip(target_events, 0, 127)
+
+    # Validate length of event token sequence (should be multiple of 3)
+    if len(input_events) % 3 != 0 or len(target_events) % 3 != 0:
+        raise ValueError(f"Invalid compound sequence length in {fname}")
+
+    print(f"Processed {fname} with {len(input_events)//3} input tokens and {len(target_events)//3} target tokens")
+    return torch.tensor(input_events), torch.tensor(target_events)
+
 class MIDIPairDataset(Dataset):
     def __init__(self, input_dir, target_dir):
         self.pairs = []
@@ -52,32 +77,10 @@ class MIDIPairDataset(Dataset):
         if not common_files:
             raise ValueError("No common filenames found between input and output directories")
         
-        for fname in common_files:
-            input_path = os.path.join(input_dir, fname)
-            target_path = os.path.join(target_dir, fname)
-
-            # MIDI to compound events (5-token groups)
-            input_compound = midi_to_compound(input_path, debug = True)
-            target_compound = midi_to_compound(target_path, debug = True)
-
-            # Convert compound tokens to event tokens (3-token groups)
-            input_events = compound_to_events(input_compound)
-            target_events = compound_to_events(target_compound)
-
-            # Apply clipping to event tokens
-            input_events = ops.clip(input_events, 0, 127)
-            target_events = ops.clip(target_events, 0, 127)
-
-            # Validate length of event token sequence (should be multiple of 3)
-            if len(input_events) % 3 != 0 or len(target_events) % 3 != 0:
-                raise ValueError(f"Invalid compound sequence length in {fname}")
-
-            self.pairs.append((
-                torch.tensor(input_events),
-                torch.tensor(target_events)
-            ))
-
-            print(f"Processed {fname} with {len(input_events)//3} input tokens and {len(target_events)//3} target tokens")
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            futures = [executor.submit(process_file, fname, input_dir, target_dir) for fname in common_files]
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing MIDI files"):
+                self.pairs.append(future.result())
 
     def __len__(self):
         return len(self.pairs)
