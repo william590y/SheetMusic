@@ -159,10 +159,10 @@ def main():
 
     for idx in test_dataset.indices:
         input_tensor, target_tensor = dataset[idx]
-        input_file = os.path.join(test_input_dir, f"test_input_{idx}.pt")
-        target_file = os.path.join(test_target_dir, f"test_target_{idx}.pt")
-        torch.save(input_tensor, input_file)
-        torch.save(target_tensor, target_file)
+        input_file = os.path.join(test_input_dir, f"test_input_{idx}.mid")
+        target_file = os.path.join(test_target_dir, f"test_target_{idx}.mid")
+        torch.save(events_to_midi(input_tensor.int().tolist()), input_file)
+        torch.save(events_to_midi(target_tensor.int().tolist()), target_file)
 
     print(f"Test dataset files saved to {test_input_dir} and {test_target_dir}")
 
