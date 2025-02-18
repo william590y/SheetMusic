@@ -30,9 +30,9 @@ TARGET_DIR = 'dataset/target'
 OUTPUT_DIR = 'training_output'
 
 EPOCHS = 10
-BATCH_SIZE = 1 # 1 for now, changed from 4
+BATCH_SIZE = 2 # changed from 4
 LEARNING_RATE = 5e-5
-GRAD_ACCUM = 4 
+GRAD_ACCUM = 2 # changed from 4
 LOG_INTERVAL = 1
 SAVE_INTERVAL = 1
 
@@ -55,10 +55,6 @@ def process_file(fname, input_dir, target_dir):
     # Convert compound tokens to event tokens (3-token groups)
     input_events = compound_to_events(input_compound)
     target_events = compound_to_events(target_compound)
-
-    # Apply clipping to event tokens
-    input_events = ops.clip(input_events, 0, 127)
-    target_events = ops.clip(target_events, 0, 127)
 
     # Validate length of event token sequence (should be multiple of 3)
     if len(input_events) % 3 != 0 or len(target_events) % 3 != 0:
