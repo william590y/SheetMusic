@@ -195,14 +195,14 @@ def main():
                 inputs = inputs[:, :max_length]
                 targets = targets[:, :max_length]
 
-            inputs = inputs.to(device)
+            inputs = inputs.to(device).long()
             targets = targets.to(device)
 
             # Attention mask based on non-zero tokens
             attention_mask = (inputs != 0).float()
 
             outputs = model(inputs, labels=targets, attention_mask=attention_mask)
-            loss = outputs.loss/GRAD_ACCUM
+            loss = outputs.loss
             loss.backward()
 
             if (batchidx+1) % GRAD_ACCUM == 0:
