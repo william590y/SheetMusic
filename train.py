@@ -17,6 +17,7 @@ from anticipation.convert import midi_to_compound, compound_to_events
 from anticipation import ops
 import concurrent.futures
 from tqdm import tqdm
+from peft import get_peft_model, LoraConfig
 
 
 # ----------------------
@@ -91,8 +92,20 @@ class MIDIPairDataset(Dataset):
 def collate_fn(batch):
     inputs, targets = zip(*batch)
 
-    padded_inputs = torch.nn.utils.rnn.pad_sequence(inputs, batch_first=True, padding_value=0)
-    padded_targets = torch.nn.utils.rnn.pad_sequence(targets, batch_first=True, padding_value=-100)
+    max_len = max(
+        max(inp.size(0) for inp in inputs),
+        max(tgt.size(0) for tgt in targets)
+    )
+
+    # Pad both inputs and targets to the same max_len
+    padded_inputs = torch.stack([
+        torch.nn.functional.pad(inp, (0, max_len - inp.size(0)), value=0)
+        for inp in inputs
+    ])
+    padded_targets = torch.stack([
+        torch.nn.functional.pad(tgt, (0, max_len - tgt.size(0)), value=-100)
+        for tgt in targets
+    ])
 
     return padded_inputs, padded_targets
 
@@ -108,6 +121,18 @@ def main():
     # Initialize the model (rip no tokenizer from HF)
     #tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).cuda()
+
+    lora_config = LoraConfig(
+    r=8,                    # Low rank dimension (tweak as needed)
+    lora_alpha=16,          # Scaling factor for LoRA (tweak as needed)
+    target_modules=["c_attn"],  # List of target modules. Adjust based on model.
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+    
+    model = get_peft_model(model, lora_config)
+    print("Model is now wrapped with PEFT adapters.")
 
     # Use GPU
     device = torch.device("cuda")
@@ -157,6 +182,9 @@ def main():
     global_step = 0
     total_loss = 0
 
+    total_batches = EPOCHS * len(train_loader)
+    pbar = tqdm(total=total_batches, desc="Training Progress", unit="batch")
+
     for epoch in range(EPOCHS):
         model.train()
         train_steps = 0
@@ -188,11 +216,14 @@ def main():
 
                 if global_step % LOG_INTERVAL == 0:
                     avg_loss = total_loss / train_steps
-                    print(f"Epoch {epoch + 1} | Step {global_step} | Loss {avg_loss:.4f}")
+                    # print(f"Epoch {epoch + 1} | Step {global_step} | Loss {avg_loss:.4f}")
                     # Log the training loss
                     training_loss_log.append((epoch + 1, global_step, avg_loss))
                     total_loss = 0
                     train_steps = 0
+
+            pbar.update(1)
+            pbar.set_postfix({'Epoch': epoch+1, 'Loss': f"{loss.item():.4f}"})
 
         # Validation phase
         model.eval()
