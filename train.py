@@ -29,10 +29,10 @@ TARGET_DIR = 'dataset/target'
 OUTPUT_DIR = 'training_output'
 
 EPOCHS = 10
-BATCH_SIZE = 4
+BATCH_SIZE = 1 # 1 for now, changed from 4
 LEARNING_RATE = 5e-5
-GRAD_ACCUM = 8
-LOG_INTERVAL = 10
+GRAD_ACCUM = 4 
+LOG_INTERVAL = 1
 SAVE_INTERVAL = 1
 
 TRAIN_SPLIT = 0.8
@@ -149,6 +149,9 @@ def main():
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
+    # Determine maximum allowed sequence length from the model configuration
+    max_length = model.config.n_positions
+
     # Training Loop
     best_val_loss = float('inf')
     global_step = 0
@@ -159,6 +162,11 @@ def main():
         train_steps = 0
 
         for batchidx, (inputs, targets) in enumerate(train_loader):
+            # Truncate inputs and targets if they exceed max_length
+            if inputs.size(1) > max_length:
+                inputs = inputs[:, :max_length]
+                targets = targets[:, :max_length]
+
             inputs = inputs.to(device)
             targets = targets.to(device)
 
@@ -193,6 +201,9 @@ def main():
 
         with torch.no_grad():
             for inputs, targets in val_loader:
+                if inputs.size(1) > max_length:
+                    inputs = inputs[:, :max_length]
+                    targets = targets[:, :max_length]
                 inputs = inputs.to(device)
                 targets = targets.to(device)
                 attention_mask = (inputs != 0).float()
