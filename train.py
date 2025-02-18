@@ -13,7 +13,7 @@ from transformers import PreTrainedTokenizerFast, AutoModelForCausalLM, AdamW
 from anticipation.convert import midi_to_events, events_to_midi
 from anticipation.tokenize import tokenize, maybe_tokenize
 from anticipation.vocab import VOCAB_SIZE
-from anticipation.convert import midi_to_compound, compound_to_events
+from anticipation.convert import midi_to_compound, compound_to_events, compound_to_midi
 from anticipation import ops
 import concurrent.futures
 from tqdm import tqdm
@@ -49,12 +49,8 @@ def process_file(fname, input_dir, target_dir):
     target_path = os.path.join(target_dir, fname)
 
     # MIDI to compound events (5-token groups)
-    input_compound = midi_to_compound(input_path, debug=True)
-    target_compound = midi_to_compound(target_path, debug=True)
-
-    # Convert compound tokens to event tokens (3-token groups)
-    input_events = compound_to_events(input_compound)
-    target_events = compound_to_events(target_compound)
+    input_events = midi_to_events(input_path, debug=True)
+    target_events = midi_to_events(target_path, debug=True)
 
     # Validate length of event token sequence (should be multiple of 3)
     if len(input_events) % 3 != 0 or len(target_events) % 3 != 0:
@@ -146,10 +142,11 @@ def main():
     generator = torch.Generator().manual_seed(42)
     train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size], generator = generator)
 
+    # disable collation
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, 
-                            shuffle=True, collate_fn=collate_fn)
+                            shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE,
-                          shuffle=False, collate_fn=collate_fn)
+                          shuffle=False)
 
     # Dump tokenized test dataset to disk without detokenizing
     test_input_dir = os.path.join(OUTPUT_DIR, "test_input")
@@ -161,8 +158,10 @@ def main():
         input_tensor, target_tensor = dataset[idx]
         input_file = os.path.join(test_input_dir, f"test_input_{idx}.mid")
         target_file = os.path.join(test_target_dir, f"test_target_{idx}.mid")
-        torch.save(events_to_midi(input_tensor.int().tolist()), input_file)
-        torch.save(events_to_midi(target_tensor.int().tolist()), target_file)
+        input_midi = events_to_midi(input_tensor)
+        target_midi = events_to_midi(target_tensor)
+        input_midi.save(input_file)
+        target_midi.save(target_file)
 
     print(f"Test dataset files saved to {test_input_dir} and {test_target_dir}")
 
