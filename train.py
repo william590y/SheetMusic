@@ -63,6 +63,13 @@ def process_file(fname, input_dir, target_dir):
     if len(input_events) % 3 != 0 or len(target_events) % 3 != 0:
         raise ValueError(f"Invalid compound sequence length in {fname}")
 
+    # Map raw event tokens to model vocabulary indices
+    try:
+        input_token_ids = encode_tokens(input_events)
+        target_token_ids = encode_tokens(target_events)
+    except ValueError as e:
+        print(f"Encoding error in file {fname}: {str(e)}")
+
     print(f"Processed {fname} with {len(input_events)//3} input tokens and {len(target_events)//3} target tokens")
     return torch.tensor(input_events), torch.tensor(target_events)
 
@@ -107,7 +114,7 @@ def main():
 
     # Initialize the model (rip no tokenizer from HF)
     #tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, vocab_size=VOCAB_SIZE, ignore_mismatched_sizes = True).cuda()
+    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).cuda()
 
     # Use GPU
     device = torch.device("cuda")
