@@ -7,6 +7,7 @@ import os
 import csv
 import torch
 import random
+import tempfile
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, random_split
 from transformers import PreTrainedTokenizerFast, AutoModelForCausalLM, AdamW
@@ -27,7 +28,7 @@ from peft import get_peft_model, LoraConfig
 MODEL_NAME = 'stanford-crfm/music-large-800k'
 INPUT_DIR = 'dataset/input'
 TARGET_DIR = 'dataset/target'
-OUTPUT_DIR = 'training_output'
+OUTPUT_DIR = 'training_output_run_2'
 
 EPOCHS = 10
 BATCH_SIZE = 2 # changed from 4
@@ -44,24 +45,52 @@ TEST_SPLIT = 0.1
 # Dataset and Collation
 # ----------------------
 
+def tensor_to_midi(tensor):
+    """Convert a tensor of events to a MIDI file object"""
+    # Ensure tensor is on CPU and convert to integer list
+    events = tensor.tolist()
+
+    return events_to_midi(events)
+
 def process_file(fname, input_dir, target_dir):
     input_path = os.path.join(input_dir, fname)
     target_path = os.path.join(target_dir, fname)
+    try:
+        # MIDI to compound events
+        input_events = midi_to_events(input_path, debug=True)
+        target_events = midi_to_events(target_path, debug=True)
 
-    # MIDI to compound events (5-token groups)
-    input_events = midi_to_events(input_path, debug=True)
-    target_events = midi_to_events(target_path, debug=True)
+        # Round-trip check
+        input_tensor = torch.tensor(input_events)
+        target_tensor = torch.tensor(target_events)
+        
+        input_midi = tensor_to_midi(input_tensor)
+        target_midi = tensor_to_midi(target_tensor)
 
-    # Validate length of event token sequence (should be multiple of 3)
-    if len(input_events) % 3 != 0 or len(target_events) % 3 != 0:
-        raise ValueError(f"Invalid compound sequence length in {fname}")
+        with tempfile.NamedTemporaryFile(suffix = ".mid", delete = False) as tmp_in:
+            tmp_input_path = tmp_in.name
+        with tempfile.NamedTemporaryFile(suffix =".mid", delete = False) as tmp_tgt:
+            tmp_target_path = tmp_tgt.name
 
-    print(f"Processed {fname} with {len(input_events)//3} input tokens and {len(target_events)//3} target tokens")
-    return torch.tensor(input_events), torch.tensor(target_events)
+        input_midi.save(tmp_input_path)
+        target_midi.save(tmp_target_path)
+
+        # Try converting back to events 
+        _ = midi_to_events(tmp_input_path, debug= True)
+        _ = midi_to_events(tmp_target_path, debug= True)
+
+        os.remove(tmp_input_path)
+        os.remove(tmp_target_path)
+    except Exception as e:
+        print(f"Rejected {fname} due to conversion error: {e}")
+        return None
+    
+    return input_tensor, target_tensor
 
 class MIDIPairDataset(Dataset):
     def __init__(self, input_dir, target_dir):
         self.pairs = []
+        self.rejected = 0
 
         input_files = set(os.listdir(input_dir))
         target_files = set(os.listdir(target_dir))
@@ -73,33 +102,17 @@ class MIDIPairDataset(Dataset):
         with concurrent.futures.ProcessPoolExecutor() as executor:
             futures = [executor.submit(process_file, fname, input_dir, target_dir) for fname in common_files]
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing MIDI files"):
-                self.pairs.append(future.result())
+                result = future.result()
+                if result is None:
+                    self.rejected += 1
+                    continue
+                self.pairs.append(result)
 
     def __len__(self):
         return len(self.pairs)
     
     def __getitem__(self, idx):
         return self.pairs[idx]
-    
-def collate_fn(batch):
-    inputs, targets = zip(*batch)
-
-    max_len = max(
-        max(inp.size(0) for inp in inputs),
-        max(tgt.size(0) for tgt in targets)
-    )
-
-    # Pad both inputs and targets to the same max_len
-    padded_inputs = torch.stack([
-        torch.nn.functional.pad(inp, (0, max_len - inp.size(0)), value=0)
-        for inp in inputs
-    ])
-    padded_targets = torch.stack([
-        torch.nn.functional.pad(tgt, (0, max_len - tgt.size(0)), value=-100)
-        for tgt in targets
-    ])
-
-    return padded_inputs, padded_targets
 
 # ----------------------
 # Training Loop
@@ -132,6 +145,7 @@ def main():
 
     # Create dataset and dataloader
     dataset = MIDIPairDataset(INPUT_DIR, TARGET_DIR)
+    print(f"Number of rejected MIDI pairs: {dataset.rejected}")
 
     # Split dataset into train, validation, and test splits
     total_size = len(dataset)
@@ -144,9 +158,9 @@ def main():
 
     # disable collation
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, 
-                            shuffle=True)
+                            shuffle=True, collate_fn=None)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE,
-                          shuffle=False)
+                          shuffle=False, collate_fn=None)
 
     # Dump tokenized test dataset to disk without detokenizing
     test_input_dir = os.path.join(OUTPUT_DIR, "test_input")
@@ -156,10 +170,14 @@ def main():
 
     for idx in test_dataset.indices:
         input_tensor, target_tensor = dataset[idx]
+        if input_tensor.dim() > 1:
+            input_tensor = input_tensor[0]
+        if target_tensor.dim() > 1:
+            target_tensor = target_tensor[0]
         input_file = os.path.join(test_input_dir, f"test_input_{idx}.mid")
         target_file = os.path.join(test_target_dir, f"test_target_{idx}.mid")
-        input_midi = events_to_midi(input_tensor)
-        target_midi = events_to_midi(target_tensor)
+        input_midi = tensor_to_midi(input_tensor)
+        target_midi = tensor_to_midi(target_tensor)
         input_midi.save(input_file)
         target_midi.save(target_file)
 
