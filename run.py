@@ -8,6 +8,8 @@ from anticipation.convert import events_to_midi, midi_to_events
 from anticipation import ops
 import traceback
 import torch.nn.functional as F
+from anticipation.config import MAX_DUR
+
 
 def unpad(padded_tensor, pad_value=-100):
     # Find the index of the first pad token (if any) and slice to that length.
@@ -20,7 +22,7 @@ def unpad(padded_tensor, pad_value=-100):
 
 # Configuration
 MODEL_NAME = 'stanford-crfm/music-large-800k'
-CHECKPOINT_PATH = os.path.join('training_output_run_2', 'checkpoint-best')
+CHECKPOINT_PATH = os.path.join('training_output', 'checkpoint-best')
 DEVICE = torch.device("cuda")
 
 base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(DEVICE)
@@ -39,7 +41,7 @@ model = PeftModel.from_pretrained(base_model, CHECKPOINT_PATH)
 model.to(DEVICE)
 model.eval()
 
-input_dir = Path(r"training_output_run_2/test_input")
+input_dir = Path(r"training_output/test_input")
 output_dir = Path("output_midi")
 output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -63,6 +65,10 @@ for input_path in input_dir.glob("*.mid"):
     
     try:
         token_list = generated_tokens[0].cpu().tolist()
+        token_list = [max(0, tok) for tok in token_list]
+        for i in range(1, len(token_list), 5):
+            if token_list[i] >= MAX_DUR:
+                token_list[i] = MAX_DUR - 1
         token_tensor = torch.tensor(token_list)
         token_list = unpad(token_tensor, pad_value= 50256)
         midi_object = events_to_midi(token_list)

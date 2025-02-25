@@ -29,7 +29,7 @@ import torch.nn.functional as F
 MODEL_NAME = 'stanford-crfm/music-large-800k'
 INPUT_DIR = 'dataset/input'
 TARGET_DIR = 'dataset/target'
-OUTPUT_DIR = 'training_output_run_2'
+OUTPUT_DIR = 'training_output'
 
 EPOCHS = 10
 BATCH_SIZE = 2 # changed from 4
@@ -96,7 +96,8 @@ def collate_fn(batch, max_len):
     inputs, targets = zip(*batch)
     
     padded_inps = [F.pad(inp, (0, max_len - inp.size(0)), value=0) for inp in inputs]
-    padded_tgts = [F.pad(tgt, (0, max_len - tgt.size(0)), value=-100) for tgt in targets]
+    eos_token_id = 50256
+    padded_tgts = [F.pad(tgt, (0, max_len - tgt.size(0)), value=eos_token_id) for tgt in targets]
     
     return torch.stack(padded_inps, dim=0), torch.stack(padded_tgts, dim=0)
 
