@@ -19,7 +19,8 @@ from anticipation import ops
 import concurrent.futures
 from tqdm import tqdm
 from peft import get_peft_model, LoraConfig
-
+from torch.nn.utils.rnn import pad_sequence
+import torch.nn.functional as F
 
 # ----------------------
 # Configuration Settings
@@ -40,6 +41,7 @@ SAVE_INTERVAL = 1
 TRAIN_SPLIT = 0.8
 VAL_SPLIT = 0.1
 TEST_SPLIT = 0.1
+TRUNCATION = 10
 
 # ----------------------
 # Dataset and Collation
@@ -61,9 +63,12 @@ def process_file(fname, input_dir, target_dir):
         target_events = midi_to_events(target_path, debug=True)
 
         # Round-trip check
+        input_events = ops.clip(input_events, 0, TRUNCATION)
+        target_events = ops.clip(target_events, 0, TRUNCATION)
+
         input_tensor = torch.tensor(input_events)
         target_tensor = torch.tensor(target_events)
-        
+
         input_midi = tensor_to_midi(input_tensor)
         target_midi = tensor_to_midi(target_tensor)
 
@@ -86,6 +91,15 @@ def process_file(fname, input_dir, target_dir):
         return None
     
     return input_tensor, target_tensor
+
+def collate_fn(batch, max_len):
+    inputs, targets = zip(*batch)
+    
+    padded_inps = [F.pad(inp, (0, max_len - inp.size(0)), value=0) for inp in inputs]
+    padded_tgts = [F.pad(tgt, (0, max_len - tgt.size(0)), value=-100) for tgt in targets]
+    
+    return torch.stack(padded_inps, dim=0), torch.stack(padded_tgts, dim=0)
+
 
 class MIDIPairDataset(Dataset):
     def __init__(self, input_dir, target_dir):
@@ -147,6 +161,9 @@ def main():
     dataset = MIDIPairDataset(INPUT_DIR, TARGET_DIR)
     print(f"Number of rejected MIDI pairs: {dataset.rejected}")
 
+    global_max_len = max(max(inp.size(0), tgt.size(0)) for inp, tgt in dataset.pairs)
+    print(f"Global max sequence length: {global_max_len}")
+
     # Split dataset into train, validation, and test splits
     total_size = len(dataset)
     train_size = int(TRAIN_SPLIT * total_size)
@@ -158,9 +175,9 @@ def main():
 
     # disable collation
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, 
-                            shuffle=True, collate_fn=None)
+                            shuffle=True, collate_fn=lambda batch: collate_fn(batch, global_max_len))
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE,
-                          shuffle=False, collate_fn=None)
+                          shuffle=False, collate_fn=lambda batch: collate_fn(batch, global_max_len))
 
     # Dump tokenized test dataset to disk without detokenizing
     test_input_dir = os.path.join(OUTPUT_DIR, "test_input")
@@ -203,10 +220,8 @@ def main():
         train_steps = 0
 
         for batchidx, (inputs, targets) in enumerate(train_loader):
-            # Truncate inputs and targets if they exceed max_length
             if inputs.size(1) > max_length:
-                inputs = inputs[:, :max_length]
-                targets = targets[:, :max_length]
+                raise ValueError("Input sequence length exceeds model maximum length")
 
             inputs = inputs.to(device).long()
             targets = targets.to(device)
@@ -246,8 +261,7 @@ def main():
         with torch.no_grad():
             for inputs, targets in val_loader:
                 if inputs.size(1) > max_length:
-                    inputs = inputs[:, :max_length]
-                    targets = targets[:, :max_length]
+                    raise ValueError("Input sequence length exceeds model maximum length")
                 inputs = inputs.to(device)
                 targets = targets.to(device)
                 attention_mask = (inputs != 0).float()
